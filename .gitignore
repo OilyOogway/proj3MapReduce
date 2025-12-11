@@ -1,0 +1,34 @@
+# Virtual Environment
+mapReduce/
+venv/
+env/
+ENV/
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE Settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Results (generated files - uncomment if you want to track them)
+# results/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Distribution / Packaging
+build/
+dist/
+*.egg-info/
