@@ -1,12 +1,115 @@
+#!/usr/bin/python3
+
 import sys
 import re
+import string
 from nltk.corpus import stopwords
 
-# Load English stopwords from NLTK
+# Load NLTK English stopwords
 STOP_WORDS = set(stopwords.words('english'))
 
-# State machine for parsing Project Gutenberg books
-# States: BEFORE_START, AFTER_START, IN_TOC, IN_STORY, AFTER_END
+
+# =============================================================================
+# GUTENBERG HEADER/FOOTER DETECTION
+# =============================================================================
+
+def is_start_marker(line):
+    """
+    Check if this line marks the START of actual book content.
+    Gutenberg uses "*** START OF" to indicate where the book begins.
+    """
+    patterns = [
+        r'\*\*\* START OF',
+        r'\*\*\*START OF',
+    ]
+    return any(re.search(p, line, re.IGNORECASE) for p in patterns)
+
+
+def is_end_marker(line):
+    """
+    Check if this line marks the END of actual book content.
+    Gutenberg uses "*** END OF" to indicate where the book ends.
+    Everything after this is license/legal text.
+    """
+    patterns = [
+        r'\*\*\* END OF',
+        r'\*\*\*END OF',
+    ]
+    return any(re.search(p, line, re.IGNORECASE) for p in patterns)
+
+
+# =============================================================================
+# TABLE OF CONTENTS DETECTION
+# =============================================================================
+
+def is_table_of_contents(line):
+    """
+    Check if this line is a TOC header (e.g., "Contents", "Table of Contents").
+    """
+    patterns = [
+        r'^contents?:?$',           # "Content", "Contents", "Content:", "Contents:"
+        r'^table of contents:?$',
+    ]
+    line_lower = line.lower().strip()
+    return any(re.match(p, line_lower, re.IGNORECASE) for p in patterns)
+
+
+def is_toc_entry(line):
+    """
+    Check if this line looks like a TOC entry (numbered chapter listing).
+    TOC entries typically start with numbers, roman numerals, or chapter headings.
+    """
+    line_stripped = line.strip().lower()
+    
+    toc_entry_patterns = [
+        r'^[ivxlc]+\.?\s',           # Roman numerals: "II. ...", "XIV ..."
+        r'^\d+\.?\s',                 # Arabic numerals: "1. ...", "12 ..."
+        r'^chapter\s+[ivxlc\d]+',     # "Chapter I", "Chapter 12"
+        r'^part\s+[ivxlc\d]+',        # "Part I", "Part 2"
+        r'^prologue',                 # "Prologue"
+        r'^epilogue',                 # "Epilogue"
+        r'^appendix',                 # "Appendix"
+        r'^preface',                  # "Preface"
+        r'^introduction',             # "Introduction"
+    ]
+    return any(re.match(p, line_stripped) for p in toc_entry_patterns)
+
+
+# =============================================================================
+# WORD CLEANING
+# =============================================================================
+
+def clean_word(word):
+    """
+    Clean and normalize a word for analysis.
+    
+    Returns:
+        Cleaned word (lowercase, stripped of punctuation) if valid,
+        None if word should be filtered out.
+    
+    Filtering criteria:
+        - Minimum length of 3 characters
+        - Must be alphabetic only (no numbers or special characters)
+        - Must not be a stop word
+    """
+    # Remove surrounding punctuation (including smart quotes, dashes)
+    word = word.strip(string.punctuation + '""''—–')
+    word = word.lower()
+    
+    # Filter out invalid words
+    if not word or len(word) < 3 or word in STOP_WORDS:
+        return None
+    
+    if not word.isalpha():
+        return None
+    
+    return word
+
+# =============================================================================
+# MAIN PROCESSING
+# =============================================================================
+
+# States
 BEFORE_START = 0
 AFTER_START = 1
 IN_TOC = 2
@@ -19,57 +122,66 @@ blank_line_count = 0
 for line in sys.stdin:
     line = line.rstrip()
     
-    # Track blank lines to help detect TOC end
-    if not line.strip():
-        blank_line_count += 1
-        continue
-    else:
-        # Reset blank line counter when we see content
-        had_blank_lines = blank_line_count > 0
-        blank_line_count = 0
-    
-    # State transitions
-    if '*** START OF' in line:
+    # Check for start marker - ALWAYS reset state to AFTER_START when new book begins
+    if is_start_marker(line):
         state = AFTER_START
+        blank_line_count = 0
         continue
-    
-    if '*** END OF' in line:
+        
+    # Check for end marker - End processing for current book
+    if is_end_marker(line):
         state = AFTER_END
         continue
-    
-    # Detect TOC start (only if we're in AFTER_START state)
-    if state == AFTER_START and re.search(r'^(TABLE OF )?CONTENTS?$', line.strip(), re.IGNORECASE):
-        state = IN_TOC
+
+    # If we are before the first book or after a book ended (and haven't seen new start), skip
+    if state == BEFORE_START or state == AFTER_END:
+        continue
+
+    # Track blank lines to detect end of TOC
+    if not line:
+        blank_line_count += 1
         continue
     
-    # Handle TOC: skip only actual TOC chapter listings
-    if state == IN_TOC:
-        stripped = line.strip()
-        
-        # TOC entries are characterized by leading whitespace (indentation)
-        # Exit TOC when we see a non-empty line without leading whitespace
-        
-        if len(stripped) == 0:
-            # Empty line in TOC, skip it
-            continue
-        elif line.startswith(' ') or line.startswith('\t'):
-            # Indented line = TOC entry, skip it
-            continue
-        else:
-            # Non-empty, non-indented line = end of TOC, start of story
-            state = IN_STORY
-            # Don't continue - process this line as story content
+    # We are in the content text (non-empty line)
     
-    # Process content only in AFTER_START and IN_STORY states
+    # Check if we are entering TOC
     if state == AFTER_START or state == IN_STORY:
-        # Extract words from lines
-        words = re.findall(r'\b[\w\']+\b', line)
-        
-        for word in words:
-            # Clean word: remove punctuation, lowercase
-            word = word.lower()
-            word = re.sub(r'[^a-z]', '', word)
-            
-            # Filter: minimum length 3, alphabetic only, not a stop word
-            if len(word) >= 3 and word.isalpha() and word not in STOP_WORDS:
-                print(f"{word}\t1")
+        if is_table_of_contents(line):
+            state = IN_TOC
+            blank_line_count = 0
+            continue
+
+    # If we are in TOC, verify if we should exit based on blank lines or content
+    if state == IN_TOC:
+        # 1. Skip Explicit TOC entries/Headers always
+        if is_toc_entry(line) or line.lstrip().lower().startswith('chapter ') or line.lstrip().lower().startswith('part '):
+             blank_line_count = 0
+             continue
+
+        # 2. Heuristic: Long lines are likely story paragraphs -> Exit
+        if len(line) > 65:
+             state = IN_STORY
+             # Fall through
+             
+        # 3. Heuristic: Unindented lines (after blank lines) are likely Story Headers -> Exit
+        elif blank_line_count > 0 and not (line.startswith(' ') or line.startswith('\t')):
+             state = IN_STORY
+             # Fall through
+             
+        # 4. Default: Assume Short/Indented/Dense lines are TOC -> Skip
+        else:
+             blank_line_count = 0
+             continue
+    
+    # Reset blank line count for next iteration since we have content
+    blank_line_count = 0
+    
+    # Process content
+    if state == AFTER_START or state == IN_STORY:
+        # Use regex to extract alpha-only tokens (handling hyphens as separators, but keeping apostrophes)
+        # This keeps "one's" as "one's" (dropped by clean_word) instead of "one" (counted).
+        tokens = re.findall(r"[a-zA-Z']+", line)
+        for token in tokens:
+            cleaned = clean_word(token)
+            if cleaned:
+                print(f"{cleaned}\t1")
