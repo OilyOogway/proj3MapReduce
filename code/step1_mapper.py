@@ -1,203 +1,133 @@
-import sys
 import re
+import sys
+from typing import Optional
+
 from nltk.corpus import stopwords
-import string
 
-# Set up stopwords
-stop_words = set(stopwords.words('english'))
+# Load NLTK stop words once.
+STOP_WORDS = set(stopwords.words('english'))
 
-def clean_word(word):
+# Patterns that mark Gutenberg metadata boundaries.
+START_MARKER_PATTERNS = [
+    r'\*\*\* START OF',
+    r'\*\*\*START OF',
+]
+
+END_MARKER_PATTERNS = [
+    r'\*\*\* END OF',
+    r'\*\*\*END OF',
+]
+
+# Patterns used to detect table-of-contents sections.
+TOC_HEADER_PATTERNS = [
+    r'^contents?:?$',
+    r'^table of contents:?$',
+]
+
+TOC_ENTRY_PATTERNS = [
+    r'^[ivxlc]+\.?\s',
+    r'^\d+\.?\s',
+    r'^chapter\s+[ivxlc\d]+',
+    r'^part\s+[ivxlc\d]+',
+    r'^prologue',
+    r'^epilogue',
+    r'^appendix',
+    r'^preface',
+    r'^introduction',
+]
+
+
+def is_start_marker(line: str) -> bool:
+    return any(re.search(pattern, line, re.IGNORECASE) for pattern in START_MARKER_PATTERNS)
+
+
+def is_end_marker(line: str) -> bool:
+    return any(re.search(pattern, line, re.IGNORECASE) for pattern in END_MARKER_PATTERNS)
+
+
+def is_table_of_contents(line: str) -> bool:
+    normalized = line.lower().strip()
+    return any(re.match(pattern, normalized, re.IGNORECASE) for pattern in TOC_HEADER_PATTERNS)
+
+
+def is_toc_entry(line: str) -> bool:
+    normalized = line.strip().lower()
+    return any(re.match(pattern, normalized) for pattern in TOC_ENTRY_PATTERNS)
+
+
+def clean_word(word: str) -> Optional[str]:
     """
-    Cleans a word by:
-    1. Removes leading/trailing whitespace
-    2. Removes leading/trailing punctuation
-    3. Converts to lowercase
-    4. Checks strict alphabetic status (no internal punctuation allowed)
-    5. Filters stopwords
+    Normalize a token and filter out noise words based on TA guidance.
     """
-    word = word.strip()
-    # Strip punctuation from ends
-    word = word.strip(string.punctuation)
-    
-    if not word:
+    word = word.lower()
+
+    if len(word) < 3:
         return None
-        
-    word_lower = word.lower()
-    
-    # Strict alphabetic check (From TA Snippet)
-    if not word_lower.isalpha():
+
+    if word in STOP_WORDS:
         return None
-        
-    if word_lower in stop_words:
+
+    if not word.isalpha():
         return None
-        
-    return word_lower
 
-def is_start_marker(line):
-    return line.startswith('*** START OF')
+    return word
 
-def is_end_marker(line):
-    return line.startswith('*** END OF')
 
-def is_table_of_contents(line):
+def should_skip_separator(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith('=====') and set(stripped) == {'='}
+
+
+def process_stdin():
     """
-    Detects Table of Contents headers.
+    Replicate the TA's text-cleaning pipeline before emitting mapper output.
     """
-    line_lower = line.lower()
-    if 'contents' in line_lower:
-         return True
-    if 'table of contents' in line_lower:
-         return True
-    if 'index' in line_lower and len(line) < 20: 
-         return True
-    if 'list of illustrations' in line_lower:
-         return True
-    return False
+    text = sys.stdin.read()
+    # Join hyphenated words broken across lines.
+    text = re.sub(r'([A-Za-z])-\r?\n([A-Za-z])', r'\1\2', text)
 
-def is_toc_entry(line):
-    """
-    Heuristic to detect TOC entries.
-    """
-    if not line.strip():
-        return False
-        
-    # TOC entries are usually indented
-    if line.startswith(' ') or line.startswith('\t'):
-        return True
-        
-    # Check for "Chapter X" or Roman numerals
-    line_stripped = line.strip()
-    if line_stripped.lower().startswith('chapter'):
-        return True
-        
-    return False
+    in_content = True
+    saw_markers = False
+    skipping_toc = False
 
-def main():
-    # State tracking
-    BEFORE_START = 0
-    AFTER_START = 1
-    IN_TOC = 2
-    IN_STORY = 3
-    AFTER_END = 4
-    
-    state = BEFORE_START
-    blank_line_count = 0 
-    
-    # Track book vs chapter counts
-    
-    for line in sys.stdin:
-        # Check for book boundaries
+    for line in text.splitlines():
         if is_start_marker(line):
-            state = AFTER_START
-            blank_line_count = 0
+            saw_markers = True
+            in_content = True
+            skipping_toc = False
             continue
-            
+
         if is_end_marker(line):
-            state = AFTER_END
+            if saw_markers:
+                in_content = False
+            skipping_toc = False
             continue
 
-        if state == BEFORE_START or state == AFTER_END:
+        if not in_content:
             continue
 
-        # Track blank lines to detect end of TOC
-        if not line.strip():
-            blank_line_count += 1
-            if blank_line_count > 0 and state == IN_TOC:
-                 # Check if we should exit TOC on blank line? 
-                 pass
+        if should_skip_separator(line):
             continue
-        
-        # We are in the content text (non-empty line)
-        
-        # Check if we are entering TOC
-        if state == AFTER_START or state == IN_STORY:
-            if is_table_of_contents(line):
-                state = IN_TOC
-                blank_line_count = 0
+
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if is_table_of_contents(stripped):
+            skipping_toc = True
+            continue
+
+        if skipping_toc:
+            if is_toc_entry(stripped):
                 continue
+            skipping_toc = False
 
-        # If we are in TOC, verify if we should exit based on heuristics
-        if state == IN_TOC:
-            line_stripped = line.strip()
-            
-            # 1. Heuristic: Punctuation -> Story Start -> Exit
-            if line_stripped.endswith('.') or line_stripped.endswith('?') or line_stripped.endswith('!') or line_stripped.endswith('"') or line_stripped.endswith("'"):
-                 state = IN_STORY
-                 # Fall through
+        tokens = re.findall(r"[A-Za-z]+", line)
+        for token in tokens:
+            cleaned = clean_word(token)
+            if cleaned:
+                print(f"{cleaned}\t1")
 
-            # 2. Heuristic: Length > 65 -> Story Start -> Exit
-            elif len(line) > 65:
-                 state = IN_STORY
-                 # Fall through
-
-            # 3. Skip Explicit Meta-Headers (Chapter/Part/Book) -> Preserves 'one'
-            elif line.lstrip().lower().startswith('chapter ') or line.lstrip().lower().startswith('part ') or line.lstrip().lower().startswith('book ') or line.lstrip().lower().startswith('phase '):
-                 # In Step 1214 (Results 21/25), we did NOT Skip here?
-                 # Step 1214 was "Unindented Scavenge".
-                 # "Unindented Scavenge" DOES NOT skip Chapter headers if they are unindented.
-                 # But in standard TOC, Chapter headers ARE indented?
-                 # Wait. Step 1214 logic used "Filtered Unindented Scavenge"? No. That was 1250.
-                 # 1214 was "Step 1142 Logic" + Hybrid.
-                 # Step 1142 Logic was "Skip Indented".
-                 # So Indented "Chapter I" -> Skipped.
-                 # Unindented "Chapter I" -> Counted.
-                 # So I should implement "Skip Indented".
-                 if line[0].isspace():
-                      blank_line_count = 0
-                      continue
-                 
-                 # If Unindented -> It falls through to Scavenge.
-                 pass
-
-            # 4. Suppression: Narrator Noise ("I said", "I think") -> Skip
-            elif (is_toc_entry(line) and 'said' in line.lower()) or 'i think' in line.lower() or 'do you think' in line.lower():
-                 blank_line_count = 0
-                 continue
-                 
-            # 5. Default: Scavenge Everything Else (Unindented TOC Content)
-            # This is effectively "Process Unindented Lines in TOC".
-            else:
-                 # Logic falls through to global processing?
-                 # Or do I process here?
-                 # Step 1214 Logic processed here.
-                 tokens = re.findall(r"[a-zA-Z']+", line)
-                 for token in tokens:
-                     # Hybrid Logic
-                     token_lower = token.lower()
-                     if token_lower == "man's":
-                         print("man\t1")
-                         continue
-                     if token_lower == "holmes's":
-                         print("holmes\t1")
-                         continue
-                     cleaned = clean_word(token)
-                     if cleaned:
-                         print(f"{cleaned}\t1")
-                 blank_line_count = 0
-                 continue
-    
-        # Reset blank line count for next iteration since we have content
-        blank_line_count = 0
-        
-        # Process content
-        if state == AFTER_START or state == IN_STORY:
-            # Use regex to extract alpha-only tokens (handling hyphens as separators, but keeping apostrophes)
-            # This keeps "one's" as "one's" (dropped by clean_word) instead of "one" (counted).
-            tokens = re.findall(r"[a-zA-Z']+", line)
-            for token in tokens:
-                # Special Handling for reduced possessives
-                token_lower = token.lower()
-                if token_lower == "man's":
-                    print("man\t1")
-                    continue
-                if token_lower == "holmes's":
-                    print("holmes\t1")
-                    continue
-                
-                # Standard Cleaning
-                cleaned = clean_word(token)
-                if cleaned:
-                    print(f"{cleaned}\t1")
 
 if __name__ == "__main__":
-    main()
+    process_stdin()
