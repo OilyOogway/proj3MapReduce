@@ -1,5 +1,6 @@
 import re
 import sys
+import string
 from typing import Optional
 
 from nltk.corpus import stopwords
@@ -36,6 +37,13 @@ TOC_ENTRY_PATTERNS = [
     r'^introduction',
 ]
 
+def is_metadata_line(line: str) -> bool:
+    stripped = line.strip()
+    return (
+        stripped.startswith('Book:') or
+        stripped.startswith('Author:') or
+        stripped.startswith('Year:')
+    )
 
 def is_start_marker(line: str) -> bool:
     return any(re.search(pattern, line, re.IGNORECASE) for pattern in START_MARKER_PATTERNS)
@@ -59,6 +67,7 @@ def clean_word(word: str) -> Optional[str]:
     """
     Normalize a token and filter out noise words based on TA guidance.
     """
+    word = word.strip(string.punctuation + '""''—–')
     word = word.lower()
 
     if len(word) < 3:
@@ -72,11 +81,8 @@ def clean_word(word: str) -> Optional[str]:
 
     return word
 
-
 def should_skip_separator(line: str) -> bool:
-    stripped = line.strip()
-    return stripped.startswith('=====') and set(stripped) == {'='}
-
+    return line.strip().startswith('=====')
 
 def process_stdin():
     """
@@ -113,16 +119,17 @@ def process_stdin():
         if not stripped:
             continue
 
+        if is_metadata_line(stripped):
+            continue
+
         if is_table_of_contents(stripped):
             skipping_toc = True
             continue
 
-        if skipping_toc:
-            if is_toc_entry(stripped):
-                continue
-            skipping_toc = False
-
-        tokens = re.findall(r"[A-Za-z]+", line)
+        if skipping_toc and is_toc_entry(stripped):
+            continue
+        
+        tokens = re.findall(r"\b[\w']+\b", line)
         for token in tokens:
             cleaned = clean_word(token)
             if cleaned:
